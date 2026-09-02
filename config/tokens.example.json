@@ -1,0 +1,9 @@
+﻿{
+  "_comment": "Copy to %USERPROFILE%\\.qonto\\tokens.json, then paste your credentials. Never commit the filled file.",
+  "_where_to_generate": "Qonto web app -> pick the organization -> Integrations and partnerships -> API key. Two values per organization: the login (identifier) and the secret key.",
+  "_auth_format": "Authorization: login:secret (raw concatenation, no Bearer, no Base64).",
+  "entites": {
+    "my-company":    { "label": "My Company SAS",    "login": "PASTE-LOGIN-HERE", "secret": "PASTE-SECRET-KEY-HERE" },
+    "other-company": { "label": "Other Company SARL", "login": "PASTE-LOGIN-HERE", "secret": "PASTE-SECRET-KEY-HERE" }
+  }
+}
