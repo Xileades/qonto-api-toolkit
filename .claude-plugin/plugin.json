@@ -1,0 +1,9 @@
+{
+  "name": "qonto-api-toolkit",
+  "version": "0.1.0",
+  "description": "PowerShell library and Claude skill for the Qonto Business API: multi-company balances, transactions, statements. Read-only.",
+  "author": { "name": "Xileades" },
+  "homepage": "https://github.com/Xileades/qonto-api-toolkit",
+  "repository": "https://github.com/Xileades/qonto-api-toolkit",
+  "license": "MIT"
+}
