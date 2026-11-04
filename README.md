@@ -29,6 +29,8 @@ documented in `docs/PITFALLS.md` so they cost you nothing.
 |---|---|
 | `lib/qo-api.ps1` | the client: auth, pagination, throttling, bounded retry, group view |
 | `config/tokens.example.json` | credentials file template, one entry per company |
+| `config/config.example.json` | optional: read credentials from Azure Key Vault instead |
+| `tests/test-credentials.ps1` | offline tests of credential loading (no network, fictitious values) |
 | `docs/PITFALLS.md` | what the documentation does not say |
 | `skills/qonto-access/` | Claude skill wrapping the library |
 | `examples/` | ready-to-run scripts: group balances, monthly CSV export, consolidated cashflow |
@@ -60,6 +62,36 @@ want to type; delete the ones you do not need.
 
 This file never belongs on a network share or in a repository. One key per
 person: individual traceability and revocation.
+
+### Optional: credentials in Azure Key Vault instead of a file
+
+If your people sign in to Windows with Entra ID (Microsoft 365), the Qonto
+credentials can stay in an Azure Key Vault and be read **at run time, in
+memory**, with the user's own Windows sign-in - no password prompt, no secret on
+disk, nothing to copy when someone gets a new PC. Put a `config.json` (it holds
+**no** secret) next to where `tokens.json` would be:
+
+```powershell
+Copy-Item .\config\config.example.json "$env:USERPROFILE\.qonto\config.json"
+notepad "$env:USERPROFILE\.qonto\config.json"   # vault URL, app id, companies
+```
+
+One secret per company **and per person**, named by default
+`qonto-token-{company}-{user}` (`{user}` = the part of the sign-in before `@`,
+letters and digits only: `jane.doe@contoso.com` -> `janedoe`). Its value is the
+Qonto **login and secret key joined by a colon**, `login:secret-key`; the library
+splits it at the first colon. Grant each person **Key Vault Secrets User on their
+own secrets only**, so per-person traceability and revocation are kept. One-time
+setup: an Entra app registration (public client, no secret) with the delegated
+permission *Azure Key Vault / user_impersonation*, admin consent, and the
+redirect URI `ms-appx-web://microsoft.aad.brokerplugin/<app id>`. Because
+`config.json` is not secret, it can be pushed to every workstation by Intune.
+
+Without `config.json`, nothing changes: the library reads `tokens.json` as
+before. If the vault cannot be read, the library stops with a `Key Vault:` error
+and does **not** fall back to a file. The one trap of this mode is in
+[`docs/PITFALLS.md`](docs/PITFALLS.md) ("Key Vault mode"). Set `QONTO_HOME` to
+use another folder than `%USERPROFILE%\.qonto`.
 
 ### 3. Load and check
 
@@ -106,7 +138,7 @@ QOGet 'my-company' 'memberships/me'
 
 | Function | Role |
 |---|---|
-| `QOEntites` | companies declared in `tokens.json` |
+| `QOEntites` | companies declared in `tokens.json` (or `config.json` in Key Vault mode) |
 | `QOMe $e` | pre-flight: legal name, slug, registration number behind the key |
 | `QOOrg $e` | raw organization + accounts (cached per company) |
 | `QOComptes $e [-externes]` | accounts of one company: name, slug, IBAN, balance, available |

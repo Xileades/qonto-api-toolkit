@@ -4,14 +4,122 @@
 
 $script:QOBase   = 'https://thirdparty.qonto.com/v2'
 $script:QOTokens = $null
+$script:QOCFG    = $null
+$script:QOKVJ    = $null
 $script:QOOrgs   = @{}
 $script:QOLast   = [datetime]::MinValue
 
+# --- Paths and credential sources ---------------------------------------------
+
+function QOHome {
+    if ($env:QONTO_HOME) { return $env:QONTO_HOME }
+    return (Join-Path $env:USERPROFILE '.qonto')
+}
+
+# Two credential sources, chosen per user in %USERPROFILE%\.qonto\config.json:
+#   "file"     (default, also when config.json is absent): tokens.json, as before.
+#   "keyvault" : credentials are read at run time from an Azure Key Vault with the
+#                user's own Windows sign-in (WAM, silent). Nothing secret on disk.
+# See config/config.example.json and docs/PITFALLS.md ("Key Vault mode").
+
+function QOConfig {
+    if ($script:QOCFG) { return $script:QOCFG }
+    $p = Join-Path (QOHome) 'config.json'
+    if (Test-Path -LiteralPath $p) {
+        $script:QOCFG = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else {
+        $script:QOCFG = [pscustomobject]@{ source = 'file' }
+    }
+    return $script:QOCFG
+}
+
+# Access token for Key Vault, obtained SILENTLY from the Windows account broker
+# (WAM) with the signed-in Entra ID account. No password, no client secret.
+# Requires an Entra-joined (or registered) Windows device and an app registration
+# with the redirect URI ms-appx-web://microsoft.aad.brokerplugin/<clientId>.
+# PITFALL: asking by scope returns Success with an EMPTY token; the v1 "resource"
+# property is required, and in PowerShell 5.1 it can only be added by reflection.
+function QOVaultToken {
+    if ($script:QOKVJ -and $script:QOKVJ.Expires -gt (Get-Date).AddMinutes(5)) { return $script:QOKVJ.Token }
+    $kv = (QOConfig).keyvault
+    if (-not $kv -or -not $kv.vaultUrl -or -not $kv.clientId) {
+        throw "Key Vault: config.json needs keyvault.vaultUrl and keyvault.clientId (see config/config.example.json)."
+    }
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $asTaskG = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+        $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+    $await = { param($op, [type]$t)
+        $tk = $asTaskG.MakeGenericMethod($t).Invoke($null, @($op)); $tk.Wait(-1) | Out-Null; $tk.Result }
+    $null = [Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager, Windows.Security.Authentication.Web.Core, ContentType = WindowsRuntime]
+    $null = [Windows.Security.Authentication.Web.Core.WebTokenRequestResult, Windows.Security.Authentication.Web.Core, ContentType = WindowsRuntime]
+    $null = [Windows.Security.Credentials.WebAccountProvider, Windows.Security.Credentials, ContentType = WindowsRuntime]
+    $mgr  = [Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager]
+    $prov = & $await ($mgr::FindAccountProviderAsync('https://login.microsoft.com', 'organizations')) ([Windows.Security.Credentials.WebAccountProvider])
+    $req  = New-Object Windows.Security.Authentication.Web.Core.WebTokenRequest($prov, '', $kv.clientId)
+    [void][System.Collections.Generic.IDictionary[string, string]].GetMethod('Add').Invoke($req.Properties, @('resource', 'https://vault.azure.net'))
+    $res  = & $await ($mgr::GetTokenSilentlyAsync($req)) ([Windows.Security.Authentication.Web.Core.WebTokenRequestResult])
+    if ($res.ResponseStatus -ne 'Success') {
+        throw "Key Vault: Windows sign-in refused ($($res.ResponseStatus) $($res.ResponseError.ErrorCode)). Is Windows signed in with your work account?"
+    }
+    $d = @($res.ResponseData)[0]
+    if ([string]::IsNullOrEmpty($d.Token)) { throw 'Key Vault: empty access token (see PITFALLS, Key Vault mode).' }
+    $script:QOKVJ = @{ Token = $d.Token; Account = $d.WebAccount.UserName; Expires = (Get-Date).AddMinutes(50) }
+    return $d.Token
+}
+
+# Short user id used in secret names: jane.doe@contoso.com -> janedoe
+function QOVaultUser {
+    if (-not $script:QOKVJ) { [void](QOVaultToken) }
+    return (($script:QOKVJ.Account -split '@')[0] -replace '[^a-zA-Z0-9]', '').ToLower()
+}
+
+# Reads ONE secret value from the vault. Isolated so that tests can replace it.
+function QOVaultSecret {
+    param([Parameter(Mandatory)][string]$name)
+    $kv = (QOConfig).keyvault
+    $h  = @{ Authorization = 'Bearer ' + (QOVaultToken) }
+    try { return (Invoke-RestMethod -Uri "$($kv.vaultUrl.TrimEnd('/'))/secrets/$($name)?api-version=7.4" -Headers $h).value }
+    catch { throw "Key Vault: secret '$name' not readable ($($_.Exception.Response.StatusCode)). Missing 'Key Vault Secrets User' role on it?" }
+}
+
+# A vault secret holds "login:secret-key". Split at the FIRST colon only; the
+# message never contains the value.
+function QOSplitSecret {
+    param([string]$value, [Parameter(Mandatory)][string]$name)
+    $v = if ($null -eq $value) { '' } else { $value.Trim() }
+    $i = $v.IndexOf(':')
+    if ($i -lt 0) { throw "Key Vault: secret '$name' has no ':' separator (expected login:secret-key)" }
+    if ($i -eq 0 -or $i -eq $v.Length - 1) { throw "Key Vault: secret '$name' has an empty login or secret-key (expected login:secret-key)" }
+    return [pscustomobject]@{ login = $v.Substring(0, $i); secret = $v.Substring($i + 1) }
+}
+
+# Same shape in both modes: {<slug>: {label, login, secret}}. QOEntite, QOHdr and the
+# skills do not care where the credentials came from. Key Vault values stay in memory.
 function QOTokensLoad {
     if ($script:QOTokens) { return $script:QOTokens }
-    $p = Join-Path $env:USERPROFILE '.qonto\tokens.json'
+    $cfg = QOConfig
+    if ($cfg.source -eq 'keyvault') {
+        $kv  = $cfg.keyvault
+        $pat = if ($kv.secretName) { $kv.secretName } else { 'qonto-token-{company}-{user}' }
+        $usr = QOVaultUser
+        $o = [ordered]@{}
+        foreach ($p in $cfg.entites.PSObject.Properties) {
+            if ($p.Name -like '_*') { continue }
+            $login = $null; $secret = $null
+            if ($p.Value.api -ne $false) {
+                $n = $pat.Replace('{company}', $p.Name).Replace('{user}', $usr)
+                $s = QOSplitSecret (QOVaultSecret $n) $n
+                $login = $s.login; $secret = $s.secret
+            }
+            $o[$p.Name] = [pscustomobject]@{ label = $p.Value.label; login = $login; secret = $secret; note = $p.Value.note }
+        }
+        $script:QOTokens = [pscustomobject]$o
+        return $script:QOTokens
+    }
+    $p = Join-Path (QOHome) 'tokens.json'
     if (-not (Test-Path $p)) {
-        throw "tokens.json not found ($p). See README.md"
+        throw "tokens.json not found ($p). See README.md, or use the keyvault source (config/config.example.json)."
     }
     $j = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $j.entites) { throw "tokens.json invalid: 'entites' property missing" }
@@ -20,7 +128,12 @@ function QOTokensLoad {
 }
 
 function QOEntites {
-    # Companies declared in tokens.json (keys starting with _ are comments)
+    # Companies declared (keys starting with _ are comments). In Key Vault mode the
+    # list comes from config.json alone: no network call, no secret read.
+    $cfg = QOConfig
+    if ($cfg.source -eq 'keyvault') {
+        return @($cfg.entites.PSObject.Properties.Name | Where-Object { $_ -notlike '_*' })
+    }
     (QOTokensLoad).PSObject.Properties.Name | Where-Object { $_ -notlike '_*' }
 }
 
@@ -32,7 +145,7 @@ function QOEntite {
     }
     $x = $t.$e
     if (-not $x.login -or -not $x.secret -or $x.secret -like 'PASTE*') {
-        throw "Company '$e': login/secret not filled in tokens.json"
+        throw "Company '$e': no login/secret available (not filled in tokens.json, or declared with api:false in config.json)"
     }
     $x
 }

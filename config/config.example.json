@@ -1,0 +1,17 @@
+{
+  "_comment": "OPTIONAL. Copy to %USERPROFILE%\\.qonto\\config.json (or $env:QONTO_HOME\\config.json) to read credentials from Azure Key Vault instead of tokens.json. Contains NO secret: it can be shared, versioned or pushed by Intune. Without this file the toolkit uses tokens.json, as before.",
+  "source": "keyvault",
+  "keyvault": {
+    "vaultUrl": "https://YOUR-VAULT.vault.azure.net",
+    "clientId": "00000000-0000-0000-0000-000000000000",
+    "secretName": "qonto-token-{company}-{user}",
+    "_doc": "clientId = an Entra app registration (public client, no secret) with delegated permission Azure Key Vault / user_impersonation and the redirect URI ms-appx-web://microsoft.aad.brokerplugin/<clientId>. {user} = the part of the Windows sign-in before @, letters and digits only, lower case (jane.doe@contoso.com -> janedoe). Each secret holds the Qonto login and secret key as 'login:secret-key' (split at the first colon). Give each person 'Key Vault Secrets User' on their own secrets only."
+  },
+  "entites": {
+    "company-a":     { "label": "Company A Ltd" },
+    "company-b":     { "label": "Company B SAS" },
+    "holding":       { "label": "Group Holding" },
+    "no-api-entity": { "label": "Small entity without API access", "api": false,
+      "note": "No Qonto API key for this entity: QOEntite throws an explicit error for this slug on purpose." }
+  }
+}
