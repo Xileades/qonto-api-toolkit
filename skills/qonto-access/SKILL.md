@@ -19,16 +19,32 @@ If the library is shared from a network drive, copy it locally first: the
 share as the source of truth and the local copy as a cache overwritten at every
 run. Do **not** work around it by setting the policy to `Bypass`.
 
-If `qo-api.ps1` throws "tokens.json not found", point the user at the README.
-Never guess a key, never reuse someone else's, never print or log one.
+If `qo-api.ps1` throws "tokens.json not found", point the user at the README
+(`config/tokens.example.json`, or `config/config.example.json` if their keys are
+kept in Azure Key Vault). Never guess a key, never reuse someone else's, never
+print or log one, and never ask the user to paste a key or secret into the
+conversation.
+
+If it throws a "Key Vault:" error, relay it as is: it names the secret and the
+likely cause (Windows not signed in with the work account, missing
+*Key Vault Secrets User* role, secret not of the form `login:secret-key`). There
+is no fallback to a file in that mode: do not work around it.
 
 ## 2. Companies and keys
 
-**One Qonto key is bound to one organization.** Hence one entry per company in
-`%USERPROFILE%\.qonto\tokens.json`, never on a share, never in git. Each entry
-has a `login` (organization identifier) and a `secret`, both shown in the web
-app under *Integrations and partnerships → API key* after switching to that
-organization.
+**One Qonto key is bound to one organization.** Hence one entry per company.
+Where the keys live depends on the user's setup, and the functions below behave
+the same either way:
+
+- **File** (default, no `config.json`): `%USERPROFILE%\.qonto\tokens.json`,
+  never on a share, never in git. Each entry has a `login` (organization
+  identifier) and a `secret`, both shown in the web app under *Integrations and
+  partnerships → API key* after switching to that organization.
+- **Azure Key Vault** (`%USERPROFILE%\.qonto\config.json` with
+  `"source": "keyvault"`): one secret per company and per person, value
+  `login:secret-key`, read at run time in memory with the user's Windows
+  sign-in. `config.json` holds no secret. `QOEntites` lists the companies from
+  it without calling the vault.
 
 Pre-flight before anything unusual:
 
@@ -44,7 +60,7 @@ Base `https://thirdparty.qonto.com/v2`, header `Authorization: <login>:<secret>`
 
 | Function | Role |
 |---|---|
-| `QOEntites` | companies in tokens.json |
+| `QOEntites` | companies declared (tokens.json or config.json) |
 | `QOMe $e` | pre-flight: which company answers |
 | `QOComptes $e [-externes]` | accounts: name, slug, IBAN, balance, available |
 | `QOSoldes [$companies]` | **group view**: every account of every company |
